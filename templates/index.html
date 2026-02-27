@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>图片批处理调度台</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+    <section class="card">
+      <div class="section-head">
+        <h2>1) API 配置</h2>
+        <p class="section-desc">配置模型与请求参数，可保存为预设复用。</p>
+      </div>
+
+      <div class="grid-two">
+        <label>系统提示词
+          <textarea id="system_prompt" rows="3"></textarea>
+        </label>
+        <label>用户提示词
+          <textarea id="user_prompt" rows="3"></textarea>
+        </label>
+      </div>
+
+      <div class="grid-three">
+        <label>API Key
+          <input id="api_key" type="password" placeholder="sk-..." autocomplete="off" />
+        </label>
+        <label>API URL
+          <input id="api_url" type="text" />
+        </label>
+        <label>模型名
+          <input id="model_name" type="text" />
+        </label>
+      </div>
+
+      <div class="grid-five">
+        <label>最大 Tokens
+          <input id="max_tokens" type="number" min="1" />
+        </label>
+        <label>温度
+          <input id="temperature" type="number" step="0.1" min="0" max="2" />
+        </label>
+        <label>并发上限
+          <input id="concurrency_limit" type="number" min="1" />
+        </label>
+        <label>失败重试
+          <input id="max_retries" type="number" min="0" />
+        </label>
+        <label>重试间隔(秒)
+          <input id="retry_interval" type="number" step="0.1" min="0.1" />
+        </label>
+      </div>
+
+      <div class="grid-three">
+        <label>请求超时(秒)
+          <input id="timeout_seconds" type="number" min="5" />
+        </label>
+        <label>API 模式
+          <select id="api_mode">
+            <option value="auto">auto</option>
+            <option value="chat_completions">chat_completions</option>
+            <option value="responses">responses</option>
+          </select>
+        </label>
+        <label>Token 字段
+          <select id="token_field">
+            <option value="auto">auto</option>
+            <option value="max_tokens">max_tokens</option>
+            <option value="max_completion_tokens">max_completion_tokens</option>
+            <option value="max_output_tokens">max_output_tokens</option>
+            <option value="none">none</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="toolbar">
+        <button id="btn_save_config">保存当前配置</button>
+        <input id="preset_name" type="text" placeholder="预设名，例如：文生图A" />
+        <button id="btn_save_preset">保存为预设</button>
+        <select id="preset_select"></select>
+        <button id="btn_apply_preset">应用预设</button>
+        <button id="btn_delete_preset" class="danger">删除预设</button>
+        <button id="btn_export">导出配置</button>
+        <label class="file-button">
+          导入配置
+          <input id="import_file" type="file" accept=".json,application/json" />
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>2) 路径批处理</h2>
+        <p class="section-desc">支持目录和单图输入，运行中可随时刷新与紧急停止。</p>
+      </div>
+
+      <div class="grid-two">
+        <label>输入路径（目录或单图）
+          <input id="input_path" type="text" placeholder="/path/to/images" />
+        </label>
+        <div class="toolbar align-end">
+          <button id="btn_start" class="primary">开始批处理</button>
+          <button id="btn_stop" class="danger">紧急停止</button>
+          <button id="btn_retry_failed">一键重试失败任务</button>
+          <button id="btn_refresh">刷新</button>
+          <button id="btn_clear" class="danger">清空任务</button>
+        </div>
+      </div>
+      <div id="run_status" class="hint run-status" data-state="idle">状态：待机</div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>3) 手动保存规则</h2>
+        <p class="section-desc">按模板输出文件名，支持文本伴随文件与首图保存策略。</p>
+      </div>
+
+      <div class="grid-three">
+        <label>输出目录
+          <input id="output_dir" type="text" placeholder="/path/to/output" />
+        </label>
+        <label>文件名模板
+          <input id="filename_template" type="text" value="{src_stem}_{result_index}" />
+        </label>
+        <label>仅保存已勾选
+          <select id="only_selected">
+            <option value="true">是</option>
+            <option value="false">否</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="grid-three">
+        <label>多图仅保存首张
+          <select id="only_first_if_multiple">
+            <option value="false">关闭</option>
+            <option value="true">开启（仅保存首张，命名为源名，单张也生效）</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="grid-three">
+        <label>替换 from
+          <input id="replace_from" type="text" placeholder="start" />
+        </label>
+        <label>替换 to
+          <input id="replace_to" type="text" placeholder="end" />
+        </label>
+        <label>生成同名 txt
+          <select id="create_txt">
+            <option value="false">否</option>
+            <option value="true">是</option>
+          </select>
+        </label>
+      </div>
+
+      <label>TXT 模板
+        <input id="txt_template" type="text" value="{src_name}" />
+      </label>
+      <details id="txt_var_guide" class="var-guide-details">
+        <summary>TXT 模板变量说明</summary>
+        <div class="var-guide-list">
+          <div class="var-guide-item">
+            <div class="var-key">{src_name}</div>
+            <div class="var-desc">源文件名（含后缀）。示例：`001_start.png`</div>
+            <div class="var-usage">用法：文件名原样写入到 txt 内容。</div>
+            <button data-insert-value="{src_name}">插入到模板</button>
+          </div>
+          <div class="var-guide-item">
+            <div class="var-key">{src_stem}</div>
+            <div class="var-desc">源文件名（不含后缀）。示例：`001_start`</div>
+            <div class="var-usage">用法：适合组合前后缀，如：`角色_{src_stem}`。</div>
+            <button data-insert-value="{src_stem}">插入到模板</button>
+          </div>
+          <div class="var-guide-item">
+            <div class="var-key">{image_name}</div>
+            <div class="var-desc">保存后的图片文件名（含后缀）。</div>
+            <div class="var-usage">用法：让 txt 与导出图片文件名保持一致。</div>
+            <button data-insert-value="{image_name}">插入到模板</button>
+          </div>
+          <div class="var-guide-item">
+            <div class="var-key">{task_id}</div>
+            <div class="var-desc">当前任务唯一 ID。</div>
+            <div class="var-usage">用法：用于追踪来源任务，排查问题。</div>
+            <button data-insert-value="{task_id}">插入到模板</button>
+          </div>
+          <div class="var-guide-item">
+            <div class="var-key">{result_index}</div>
+            <div class="var-desc">该任务内第几个结果（从 1 开始）。</div>
+            <div class="var-usage">用法：多图场景下标记顺序。</div>
+            <button data-insert-value="{result_index}">插入到模板</button>
+          </div>
+        </div>
+      </details>
+
+      <div class="toolbar">
+        <button id="btn_save_all" class="primary">批量保存全部（按当前筛选）</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>4) 任务列表（原图 + 返回图）</h2>
+        <p class="section-desc">可查看每个任务的执行详情，支持单任务重试与单次保存。</p>
+      </div>
+
+      <div class="stats-row">
+        <div id="task_stats" class="hint">任务：0</div>
+        <div id="progress_text" class="hint">总进度：0/0（0.0%）</div>
+      </div>
+      <div class="status-summary" aria-label="任务状态统计">
+        <span id="progress_pending" class="summary-chip">等待中：0</span>
+        <span id="progress_processing" class="summary-chip">处理中：0</span>
+        <span id="progress_done" class="summary-chip">完成：0</span>
+        <span id="progress_partial_success" class="summary-chip">部分成功：0</span>
+        <span id="progress_failed" class="summary-chip">失败：0</span>
+        <span id="progress_stopped" class="summary-chip">已停止：0</span>
+      </div>
+
+      <div class="progress-track">
+        <div id="progress_bar" class="progress-bar"></div>
+      </div>
+      <div id="task_list"></div>
+    </section>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

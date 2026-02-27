@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Build artifacts
+build/
+dist/
+.winbuild/
+
+# Local runtime data (contains API config/tasks/cache)
+web_data/state.json
+web_data/presets.json
+web_data/cache/
+
+# Local env and tooling cache
+.env
+.pre-commit-cache/

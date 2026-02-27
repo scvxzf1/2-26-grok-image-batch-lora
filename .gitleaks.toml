@@ -1,0 +1,15 @@
+title = "local gitleaks config"
+
+[allowlist]
+description = "allow local addresses and placeholder text"
+paths = [
+  '''^build/''',
+  '''^dist/''',
+  '''^\.winbuild/''',
+  '''^__pycache__/''',
+]
+regexes = [
+  '''sk-\.\.\.''',
+  '''http://127\.0\.0\.1(?::\d+)?''',
+  '''http://localhost(?::\d+)?''',
+]
