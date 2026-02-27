@@ -75,6 +75,21 @@
         </label>
       </div>
 
+      <div class="grid-three">
+        <label>解锁本地地址
+          <select id="unlock_local_api_url">
+            <option value="false">关闭（默认，启用 API 地址校验）</option>
+            <option value="true">开启（允许 127.0.0.1 / 内网地址）</option>
+          </select>
+        </label>
+        <label>解锁本地地址下载
+          <select id="unlock_local_download_url">
+            <option value="false">关闭（默认，启用下载地址校验）</option>
+            <option value="true">开启（允许下载 127.0.0.1 / 内网地址）</option>
+          </select>
+        </label>
+      </div>
+
       <div class="toolbar">
         <button id="btn_save_config">保存当前配置</button>
         <input id="preset_name" type="text" placeholder="预设名，例如：文生图A" />
@@ -116,6 +131,16 @@
         <h2>3) 手动保存规则</h2>
         <p class="section-desc">按模板输出文件名，支持文本伴随文件与首图保存策略。</p>
       </div>
+
+      <div class="grid-three">
+        <label>常用规则预设
+          <select id="save_rule_preset"></select>
+        </label>
+        <div class="toolbar align-end">
+          <button id="btn_apply_save_rule_preset">应用选中预设</button>
+        </div>
+      </div>
+      <div id="save_rule_preset_hint" class="hint">选择预设后可一键填充保存规则参数。</div>
 
       <div class="grid-three">
         <label>输出目录

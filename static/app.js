@@ -1,9 +1,80 @@
 const state = {
   latest: null,
   timer: null,
+  stateLoadSeq: 0,
+  stateLoadingCount: 0,
+  tasksFingerprint: null,
   debugOpenTaskIds: new Set(),
   debugLogCache: {},
   debugLoadingTaskIds: new Set(),
+};
+
+const SAVE_RULE_PRESETS = {
+  aitookit_edit: {
+    label: "AITookit编辑（start→end）",
+    hint: "示例：输入 001_start 输出 001_end（不生成同名txt）。",
+    values: {
+      filename_template: "{src_stem}",
+      replace_from: "start",
+      replace_to: "end",
+      create_txt: false,
+      txt_template: "{src_name}",
+      only_selected: true,
+      only_first_if_multiple: false,
+    },
+  },
+  keep_source_name: {
+    label: "源名直出（保留后缀）",
+    hint: "输出文件名保持源名（不做替换），适合快速整理。",
+    values: {
+      filename_template: "{src_stem}",
+      replace_from: "",
+      replace_to: "",
+      create_txt: false,
+      txt_template: "{src_name}",
+      only_selected: true,
+      only_first_if_multiple: false,
+    },
+  },
+  source_with_txt: {
+    label: "源名 + 元信息TXT",
+    hint: "输出源名，同时生成 TXT（包含源名与任务标识）。",
+    values: {
+      filename_template: "{src_stem}",
+      replace_from: "",
+      replace_to: "",
+      create_txt: true,
+      txt_template: "{src_name}\\naitookit编辑\\n任务:{task_id}",
+      only_selected: true,
+      only_first_if_multiple: false,
+    },
+  },
+  first_only_clean: {
+    label: "仅首图（简洁命名）",
+    hint: "多图任务仅保存首图，命名使用源名，适合出图挑选。",
+    values: {
+      filename_template: "{src_stem}",
+      replace_from: "",
+      replace_to: "",
+      create_txt: false,
+      txt_template: "{src_name}",
+      only_selected: true,
+      only_first_if_multiple: true,
+    },
+  },
+  indexed_archive: {
+    label: "归档编号（带序号）",
+    hint: "按 {src_stem}_{result_index} 输出，适合保留多结果。",
+    values: {
+      filename_template: "{src_stem}_{result_index}",
+      replace_from: "",
+      replace_to: "",
+      create_txt: false,
+      txt_template: "{src_name}",
+      only_selected: true,
+      only_first_if_multiple: false,
+    },
+  },
 };
 
 function $(id) {
@@ -66,23 +137,27 @@ async function copyTextToClipboard(text) {
 }
 
 async function ensureDebugLog(taskId, preElement = null) {
-  if (state.debugLogCache[taskId]) {
-    return state.debugLogCache[taskId];
+  const safeTaskId = sanitizeTaskId(taskId);
+  if (!safeTaskId) {
+    return null;
   }
-  if (state.debugLoadingTaskIds.has(taskId)) {
+  if (state.debugLogCache[safeTaskId]) {
+    return state.debugLogCache[safeTaskId];
+  }
+  if (state.debugLoadingTaskIds.has(safeTaskId)) {
     return null;
   }
   if (preElement) {
     preElement.textContent = "日志加载中...";
   }
-  state.debugLoadingTaskIds.add(taskId);
+  state.debugLoadingTaskIds.add(safeTaskId);
   try {
-    const payload = await api(`/api/tasks/${taskId}/debug`);
+    const payload = await api(`/api/tasks/${encodeURIComponent(safeTaskId)}/debug`);
     const logText = payload.has_debug_log ? payload.debug_log : "暂无调试日志（任务可能尚未执行完成）。";
-    state.debugLogCache[taskId] = logText;
+    state.debugLogCache[safeTaskId] = logText;
     return logText;
   } finally {
-    state.debugLoadingTaskIds.delete(taskId);
+    state.debugLoadingTaskIds.delete(safeTaskId);
   }
 }
 
@@ -93,6 +168,78 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+const SAFE_ENTITY_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const DANGEROUS_ID_VALUES = new Set(["__proto__", "constructor", "prototype"]);
+
+function sanitizeEntityId(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return null;
+  }
+  if (!SAFE_ENTITY_ID_RE.test(normalized)) {
+    return null;
+  }
+  if (DANGEROUS_ID_VALUES.has(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
+function sanitizeTaskId(value) {
+  return sanitizeEntityId(value);
+}
+
+function sanitizeResultId(value) {
+  return sanitizeEntityId(value);
+}
+
+function parseTaskResultPair(value) {
+  const parts = String(value ?? "").split("::");
+  if (parts.length !== 2) {
+    return null;
+  }
+  const taskId = sanitizeTaskId(parts[0]);
+  const resultId = sanitizeResultId(parts[1]);
+  if (!taskId || !resultId) {
+    return null;
+  }
+  return { taskId, resultId };
+}
+
+function sanitizeImageUrl(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol === "http:" || protocol === "https:" || protocol === "blob:") {
+      return parsed.href;
+    }
+    const allowDataImage = /^data:image\/(?:png|jpeg|jpg|webp|gif|bmp);base64,[a-z0-9+/=\s]+$/i.test(raw);
+    if (protocol === "data:" && allowDataImage) {
+      return raw;
+    }
+    return "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function renderSafePreviewImage(imageUrl, altText) {
+  const safeUrl = sanitizeImageUrl(imageUrl);
+  if (!safeUrl) {
+    return `<div class="task-meta">图片地址无效</div>`;
+  }
+  return `<img src="${escapeHtml(safeUrl)}" alt="${escapeHtml(altText)}" loading="lazy" />`;
+}
+
+function safeInlineText(value, fallback = "-") {
+  const text = String(value ?? "").trim();
+  return escapeHtml(text || fallback);
 }
 
 function safeStatusClass(status) {
@@ -127,6 +274,8 @@ function collectConfigFromUI() {
     timeout_seconds: Number($("timeout_seconds").value || 120),
     api_mode: $("api_mode").value,
     token_field: $("token_field").value,
+    unlock_local_api_url: $("unlock_local_api_url").value === "true",
+    unlock_local_download_url: $("unlock_local_download_url").value === "true",
   };
 }
 
@@ -158,6 +307,67 @@ function fillConfigToUI(config) {
   $("timeout_seconds").value = config.timeout_seconds ?? 120;
   $("api_mode").value = config.api_mode ?? "auto";
   $("token_field").value = config.token_field ?? "auto";
+  $("unlock_local_api_url").value = config.unlock_local_api_url ? "true" : "false";
+  $("unlock_local_download_url").value = config.unlock_local_download_url ? "true" : "false";
+}
+
+function fillSaveRulePresetSelect() {
+  const select = $("save_rule_preset");
+  if (!select) {
+    return;
+  }
+  select.innerHTML = "";
+  const defaultOpt = document.createElement("option");
+  defaultOpt.value = "";
+  defaultOpt.textContent = "选择常用规则预设";
+  select.appendChild(defaultOpt);
+  Object.entries(SAVE_RULE_PRESETS).forEach(([presetId, preset]) => {
+    const option = document.createElement("option");
+    option.value = presetId;
+    option.textContent = preset.label;
+    select.appendChild(option);
+  });
+}
+
+function updateSaveRulePresetHint() {
+  const hintEl = $("save_rule_preset_hint");
+  const select = $("save_rule_preset");
+  if (!hintEl || !select) {
+    return;
+  }
+  const preset = SAVE_RULE_PRESETS[select.value];
+  if (!preset) {
+    hintEl.textContent = "选择预设后可一键填充保存规则参数。";
+    return;
+  }
+  hintEl.textContent = preset.hint;
+}
+
+function applySaveRulePreset(presetId, options = {}) {
+  const showToast = options.showToast !== false;
+  const preset = SAVE_RULE_PRESETS[presetId];
+  if (!preset) {
+    toast("预设不存在");
+    return false;
+  }
+  const values = preset.values || {};
+  $("filename_template").value = values.filename_template ?? "{src_stem}_{result_index}";
+  $("replace_from").value = values.replace_from ?? "";
+  $("replace_to").value = values.replace_to ?? "";
+  $("create_txt").value = values.create_txt ? "true" : "false";
+  $("txt_template").value = values.txt_template ?? "{src_name}";
+  $("only_selected").value = values.only_selected === false ? "false" : "true";
+  $("only_first_if_multiple").value = values.only_first_if_multiple ? "true" : "false";
+
+  const select = $("save_rule_preset");
+  if (select) {
+    select.value = presetId;
+  }
+  updateSaveRulePresetHint();
+  if (showToast) {
+    toast(`已应用规则预设：${preset.label}`);
+  }
+  return true;
 }
 
 function renderPresets(presets) {
@@ -196,7 +406,7 @@ function statusLabel(status) {
 function captureDebugOpenStateFromDOM() {
   const opened = document.querySelectorAll("#task_list details.debug-details[open]");
   opened.forEach((node) => {
-    const taskId = node.dataset.debugTaskId;
+    const taskId = sanitizeTaskId(node.dataset.debugTaskId);
     if (taskId) {
       state.debugOpenTaskIds.add(taskId);
     }
@@ -204,7 +414,7 @@ function captureDebugOpenStateFromDOM() {
 }
 
 function cleanupDebugState(tasks) {
-  const validTaskIds = new Set((tasks || []).map((task) => task.id));
+  const validTaskIds = new Set((tasks || []).map((task) => sanitizeTaskId(task.id)).filter(Boolean));
   for (const taskId of [...state.debugOpenTaskIds]) {
     if (!validTaskIds.has(taskId)) {
       state.debugOpenTaskIds.delete(taskId);
@@ -222,6 +432,30 @@ function cleanupDebugState(tasks) {
   }
 }
 
+function buildTasksFingerprint(tasks) {
+  const normalizedTasks = Array.isArray(tasks) ? tasks : [];
+  return JSON.stringify(normalizedTasks.map((task) => ({
+    id: task?.id ?? "",
+    status: task?.status ?? "",
+    source_name: task?.source_name ?? "",
+    source_path: task?.source_path ?? "",
+    source_image_url: task?.source_image_url ?? "",
+    last_error: task?.last_error ?? "",
+    last_warning: task?.last_warning ?? "",
+    attempts: task?.attempts ?? "",
+    http_status: task?.http_status ?? "",
+    results: (Array.isArray(task?.results) ? task.results : []).map((result) => ({
+      id: result?.id ?? "",
+      deleted: Boolean(result?.deleted),
+      selected: Boolean(result?.selected),
+      source_type: result?.source_type ?? "",
+      image_url: result?.image_url ?? "",
+      width: result?.width ?? "",
+      height: result?.height ?? "",
+    })),
+  })));
+}
+
 function renderTasks(tasks) {
   const list = $("task_list");
   cleanupDebugState(tasks);
@@ -229,30 +463,45 @@ function renderTasks(tasks) {
   $("task_stats").textContent = `任务：${tasks.length}`;
 
   tasks.forEach((task) => {
+    const safeTaskId = sanitizeTaskId(task.id);
+    if (!safeTaskId) {
+      console.warn("[XSS-BLOCK] 跳过非法 task id:", task.id);
+      return;
+    }
     const taskItem = document.createElement("div");
     taskItem.className = "task-item";
+    const sourceImageHtml = renderSafePreviewImage(task.source_image_url, "原图预览");
 
-    const resultHtml = task.results
+    const resultHtml = (Array.isArray(task.results) ? task.results : [])
       .filter((x) => !x.deleted)
       .map((result) => {
+        const safeResultId = sanitizeResultId(result.id);
+        if (!safeResultId) {
+          console.warn("[XSS-BLOCK] 跳过非法 result id:", result.id);
+          return `<div class="task-meta">结果 ID 无效，已拦截</div>`;
+        }
         const checked = result.selected ? "checked" : "";
+        const pairId = `${safeTaskId}::${safeResultId}`;
         const resultSourceType = escapeHtml(result.source_type || "");
+        const resultImageHtml = renderSafePreviewImage(result.image_url, "返回图预览");
+        const widthText = safeInlineText(result.width);
+        const heightText = safeInlineText(result.height);
         return `
           <div class="result-row">
             <div class="pair-preview">
               <div>
                 <div class="img-label">原图</div>
-                <img src="${task.source_image_url}" alt="原图预览" loading="lazy" />
+                ${sourceImageHtml}
               </div>
               <div>
                 <div class="img-label">返回图</div>
-                <img src="${result.image_url}" alt="返回图预览" loading="lazy" />
+                ${resultImageHtml}
               </div>
               <div class="row-actions">
-                <label><input type="checkbox" data-toggle-id="${task.id}::${result.id}" ${checked} /> 选中保存</label>
-                <button data-save-one-id="${task.id}::${result.id}" class="primary">单次保存</button>
-                <button data-delete-id="${task.id}::${result.id}" class="danger">删除此结果</button>
-                <span class="task-meta">${result.width}x${result.height} | ${resultSourceType}</span>
+                <label><input type="checkbox" data-toggle-id="${escapeHtml(pairId)}" ${checked} /> 选中保存</label>
+                <button data-save-one-id="${escapeHtml(pairId)}" class="primary">单次保存</button>
+                <button data-delete-id="${escapeHtml(pairId)}" class="danger">删除此结果</button>
+                <span class="task-meta">${widthText}x${heightText} | ${resultSourceType}</span>
               </div>
             </div>
           </div>
@@ -266,9 +515,11 @@ function renderTasks(tasks) {
     const safeLastWarning = escapeHtml(task.last_warning || "");
     const statusClass = safeStatusClass(task.status);
     const statusText = escapeHtml(statusLabel(task.status));
-    const isDebugOpen = state.debugOpenTaskIds.has(task.id);
-    const isDebugLoading = state.debugLoadingTaskIds.has(task.id);
-    const cachedDebugLog = state.debugLogCache[task.id] || "";
+    const safeAttempts = safeInlineText(task.attempts, "0");
+    const safeHttpStatus = safeInlineText(task.http_status, "-");
+    const isDebugOpen = state.debugOpenTaskIds.has(safeTaskId);
+    const isDebugLoading = state.debugLoadingTaskIds.has(safeTaskId);
+    const cachedDebugLog = state.debugLogCache[safeTaskId] || "";
     const debugText = cachedDebugLog || (isDebugLoading ? "日志加载中..." : "点击展开后加载日志...");
     const debugLoaded = cachedDebugLog ? "1" : "0";
 
@@ -277,21 +528,22 @@ function renderTasks(tasks) {
         <div>
           <strong>${safeSourceName}</strong>
           <div class="task-meta">${safeSourcePath}</div>
-          <div class="task-meta">尝试次数: ${task.attempts} | HTTP: ${task.http_status || "-"}</div>
+          <div class="task-meta">尝试次数: ${safeAttempts} | HTTP: ${safeHttpStatus}</div>
           ${safeLastError ? `<div class="task-error">${safeLastError}</div>` : ""}
           ${safeLastWarning ? `<div><span class="warning-tag" title="${safeLastWarning}">⚠ ${safeLastWarning}</span></div>` : ""}
         </div>
-        <div>
+        <div class="task-head-actions">
           <span class="status ${statusClass}">${statusText}</span>
-          <button data-retry-clear-id="${task.id}">重试（清除已有结果）</button>
-          <button data-retry-id="${task.id}">重试（保留已有结果）</button>
+          <button data-retry-clear-id="${escapeHtml(safeTaskId)}">重试（清除已有结果）</button>
+          <button data-retry-id="${escapeHtml(safeTaskId)}">重试（保留已有结果）</button>
+          <button data-delete-task-id="${escapeHtml(safeTaskId)}" class="danger">删除任务</button>
         </div>
       </div>
       <div class="result-list">${resultHtml || `<div class="task-meta">暂无返回图片</div>`}</div>
-      <details class="debug-details" data-debug-task-id="${task.id}" data-loaded="${debugLoaded}" ${isDebugOpen ? "open" : ""}>
+      <details class="debug-details" data-debug-task-id="${escapeHtml(safeTaskId)}" data-loaded="${debugLoaded}" ${isDebugOpen ? "open" : ""}>
         <summary>调试日志（默认折叠，点击展开）</summary>
         <div class="debug-tools">
-          <button class="copy-log-btn" data-copy-debug-id="${task.id}">复制日志</button>
+          <button class="copy-log-btn" data-copy-debug-id="${escapeHtml(safeTaskId)}">复制日志</button>
         </div>
         <pre class="debug-log"></pre>
       </details>
@@ -327,20 +579,37 @@ function renderProgress(progress) {
 
 async function loadState(options = {}) {
   const syncConfig = Boolean(options.syncConfig);
+  const skipIfLoading = Boolean(options.skipIfLoading);
+  if (skipIfLoading && state.stateLoadingCount > 0) {
+    return;
+  }
+  const requestSeq = ++state.stateLoadSeq;
+  state.stateLoadingCount += 1;
   try {
     captureDebugOpenStateFromDOM();
     const payload = await api("/api/state");
+    if (requestSeq !== state.stateLoadSeq) {
+      return;
+    }
     state.latest = payload;
     if (syncConfig && !isConfigEditing()) {
       fillConfigToUI(payload.current_config || {});
     }
     renderPresets(payload.presets || {});
     renderProgress(payload.progress || {});
-    renderTasks(payload.tasks || []);
+    const tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+    const tasksFingerprint = buildTasksFingerprint(tasks);
+    if (tasksFingerprint !== state.tasksFingerprint) {
+      renderTasks(tasks);
+      state.tasksFingerprint = tasksFingerprint;
+    }
     const runStatusEl = $("run_status");
     if (payload.running) {
       runStatusEl.textContent = "状态：批处理运行中";
       runStatusEl.dataset.state = "running";
+    } else if (Number(payload.single_retry_running || 0) > 0) {
+      runStatusEl.textContent = `状态：单任务重试中（${Number(payload.single_retry_running || 0)}）`;
+      runStatusEl.dataset.state = "retry-running";
     } else if (payload.stop_requested) {
       runStatusEl.textContent = "状态：已紧急停止";
       runStatusEl.dataset.state = "stopped";
@@ -349,11 +618,17 @@ async function loadState(options = {}) {
       runStatusEl.dataset.state = "idle";
     }
   } catch (err) {
-    toast(`刷新失败: ${err.message}`);
+    if (requestSeq === state.stateLoadSeq) {
+      toast(`刷新失败: ${err.message}`);
+    }
+  } finally {
+    state.stateLoadingCount = Math.max(0, state.stateLoadingCount - 1);
   }
 }
 
 function bindEvents() {
+  fillSaveRulePresetSelect();
+  updateSaveRulePresetHint();
   $("btn_refresh").addEventListener("click", loadState);
   $("txt_var_guide")?.addEventListener("click", (event) => {
     const btn = event.target?.closest?.("button[data-insert-value]");
@@ -362,6 +637,15 @@ function bindEvents() {
     }
     const value = btn.dataset.insertValue || "";
     insertTextAtCursor($("txt_template"), value);
+  });
+  $("save_rule_preset")?.addEventListener("change", updateSaveRulePresetHint);
+  $("btn_apply_save_rule_preset")?.addEventListener("click", () => {
+    const presetId = $("save_rule_preset")?.value || "";
+    if (!presetId) {
+      toast("请先选择规则预设");
+      return;
+    }
+    applySaveRulePreset(presetId);
   });
 
   $("btn_start").addEventListener("click", async (event) => {
@@ -423,6 +707,9 @@ function bindEvents() {
   $("btn_clear").addEventListener("click", async (event) => {
     await runWithButtonLock(event.currentTarget, "清空中...", async () => {
       try {
+        if (!window.confirm("确认清空全部任务吗？该操作不可撤销。")) {
+          return;
+        }
         await api("/api/tasks/clear", { method: "POST" });
         toast("已清空任务");
         await loadState();
@@ -496,6 +783,9 @@ function bindEvents() {
         toast("请先选择预设");
         return;
       }
+      if (!window.confirm(`确认删除预设“${name}”吗？该操作不可撤销。`)) {
+        return;
+      }
       await api(`/api/presets/${encodeURIComponent(name)}`, { method: "DELETE" });
       toast(`已删除预设: ${name}`);
       await loadState();
@@ -505,7 +795,10 @@ function bindEvents() {
   });
 
   $("btn_export").addEventListener("click", () => {
-    window.open("/api/presets/export", "_blank");
+    const exportWindow = window.open("/api/presets/export", "_blank", "noopener,noreferrer");
+    if (exportWindow) {
+      exportWindow.opener = null;
+    }
   });
 
   $("import_file").addEventListener("change", async (event) => {
@@ -564,12 +857,18 @@ function bindEvents() {
   $("task_list").addEventListener("click", async (event) => {
     const retryId = event.target?.dataset?.retryId;
     const retryClearId = event.target?.dataset?.retryClearId;
+    const deleteTaskId = event.target?.dataset?.deleteTaskId;
     const saveOneId = event.target?.dataset?.saveOneId;
     const copyDebugId = event.target?.dataset?.copyDebugId;
     const deleteId = event.target?.dataset?.deleteId;
     if (retryId) {
+      const taskId = sanitizeTaskId(retryId);
+      if (!taskId) {
+        toast("任务 ID 无效，已拦截");
+        return;
+      }
       try {
-        await api(`/api/tasks/${retryId}/retry`, { method: "POST" });
+        await api(`/api/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
         toast("已重试任务（保留旧结果）");
         await loadState();
       } catch (err) {
@@ -577,23 +876,50 @@ function bindEvents() {
       }
     }
     if (retryClearId) {
+      const taskId = sanitizeTaskId(retryClearId);
+      if (!taskId) {
+        toast("任务 ID 无效，已拦截");
+        return;
+      }
       try {
-        const payload = await api(`/api/tasks/${retryClearId}/retry_clear`, { method: "POST" });
+        const payload = await api(`/api/tasks/${encodeURIComponent(taskId)}/retry_clear`, { method: "POST" });
         toast(`已重试任务（已清除旧结果 ${payload.removed_old_results || 0} 个）`);
         await loadState();
       } catch (err) {
         toast(err.message);
       }
     }
+    if (deleteTaskId) {
+      const taskId = sanitizeTaskId(deleteTaskId);
+      if (!taskId) {
+        toast("任务 ID 无效，已拦截");
+        return;
+      }
+      try {
+        if (!window.confirm("确认删除该任务吗？该操作不可撤销。")) {
+          return;
+        }
+        await api(`/api/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+        toast("已删除任务");
+        await loadState();
+      } catch (err) {
+        toast(err.message);
+      }
+    }
     if (saveOneId) {
-      const [taskId, resultId] = saveOneId.split("::");
+      const pair = parseTaskResultPair(saveOneId);
+      if (!pair) {
+        toast("任务/结果 ID 无效，已拦截");
+        return;
+      }
+      const { taskId, resultId } = pair;
       try {
         const outputDir = $("output_dir").value.trim();
         if (!outputDir) {
           toast("请先在 3) 中填写输出目录");
           return;
         }
-        const payload = await api(`/api/tasks/${taskId}/results/${resultId}/save`, {
+        const payload = await api(`/api/tasks/${encodeURIComponent(taskId)}/results/${encodeURIComponent(resultId)}/save`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -613,9 +939,17 @@ function bindEvents() {
       }
     }
     if (deleteId) {
-      const [taskId, resultId] = deleteId.split("::");
+      const pair = parseTaskResultPair(deleteId);
+      if (!pair) {
+        toast("任务/结果 ID 无效，已拦截");
+        return;
+      }
+      const { taskId, resultId } = pair;
       try {
-        await api(`/api/tasks/${taskId}/results/${resultId}`, { method: "DELETE" });
+        if (!window.confirm("确认删除该结果吗？该操作不可撤销。")) {
+          return;
+        }
+        await api(`/api/tasks/${encodeURIComponent(taskId)}/results/${encodeURIComponent(resultId)}`, { method: "DELETE" });
         toast("已删除该结果");
         await loadState();
       } catch (err) {
@@ -623,10 +957,15 @@ function bindEvents() {
       }
     }
     if (copyDebugId) {
+      const taskId = sanitizeTaskId(copyDebugId);
+      if (!taskId) {
+        toast("任务 ID 无效，已拦截");
+        return;
+      }
       const details = event.target.closest(".debug-details");
       const pre = details?.querySelector(".debug-log");
       try {
-        const logText = await ensureDebugLog(copyDebugId, pre);
+        const logText = await ensureDebugLog(taskId, pre);
         if (!logText) {
           toast("日志加载中，请稍后重试复制");
           return;
@@ -647,9 +986,14 @@ function bindEvents() {
     if (!toggleId) {
       return;
     }
-    const [taskId, resultId] = toggleId.split("::");
+    const pair = parseTaskResultPair(toggleId);
+    if (!pair) {
+      toast("任务/结果 ID 无效，已拦截");
+      return;
+    }
+    const { taskId, resultId } = pair;
     try {
-      await api(`/api/tasks/${taskId}/results/${resultId}/toggle`, { method: "POST" });
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/results/${encodeURIComponent(resultId)}/toggle`, { method: "POST" });
       await loadState();
     } catch (err) {
       toast(err.message);
@@ -664,7 +1008,7 @@ function bindEvents() {
     if (!details.classList.contains("debug-details")) {
       return;
     }
-    const taskId = details.dataset.debugTaskId;
+    const taskId = sanitizeTaskId(details.dataset.debugTaskId);
     if (!taskId) {
       return;
     }
@@ -696,7 +1040,7 @@ function bindEvents() {
 async function init() {
   bindEvents();
   await loadState({ syncConfig: true });
-  state.timer = setInterval(loadState, 2500);
+  state.timer = setInterval(() => loadState({ skipIfLoading: true }), 2500);
 }
 
 init();

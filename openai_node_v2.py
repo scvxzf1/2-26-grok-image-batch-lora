@@ -6,10 +6,17 @@ import time
 import re
 import copy
 import random
+import ipaddress
+import socket
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from urllib.parse import urlparse, urljoin
+
+
+class ImageDownloadValidationError(Exception):
+    pass
 
 
 class OpenAICompatibleV2Node:
@@ -20,6 +27,9 @@ class OpenAICompatibleV2Node:
 
     API_MODES = ["auto", "chat_completions", "responses"]
     TOKEN_FIELDS = ["auto", "max_tokens", "max_completion_tokens", "max_output_tokens", "none"]
+    IMAGE_DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024
+    IMAGE_DOWNLOAD_MAX_REDIRECTS = 3
+    IMAGE_DOWNLOAD_CHUNK_SIZE = 65536
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -117,6 +127,10 @@ class OpenAICompatibleV2Node:
                 "download_markdown_image": ("BOOLEAN", {
                     "default": True,
                 }),
+                "download_host_allowlist": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                }),
                 "strip_think_tag": ("BOOLEAN", {
                     "default": True,
                 }),
@@ -155,6 +169,235 @@ class OpenAICompatibleV2Node:
         if "</think>" in text:
             return text.split("</think>")[-1].strip()
         return text
+
+    def mask_api_key(self, api_key):
+        value = "" if api_key is None else str(api_key)
+        if not value:
+            return ""
+        if len(value) <= 8:
+            return "*" * len(value)
+        return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"
+
+    def parse_host_allowlist(self, allowlist_text):
+        if allowlist_text is None:
+            return []
+
+        if isinstance(allowlist_text, (list, tuple, set)):
+            raw_items = list(allowlist_text)
+        else:
+            raw_items = re.split(r"[\s,]+", str(allowlist_text))
+
+        hosts = []
+        seen = set()
+        for item in raw_items:
+            candidate = str(item).strip().lower()
+            if not candidate:
+                continue
+
+            if "://" in candidate:
+                parsed = urlparse(candidate)
+                candidate = (parsed.hostname or "").strip().lower()
+                if not candidate:
+                    continue
+
+            stripped_candidate = candidate.strip("[]")
+            is_ip_literal = False
+            try:
+                ipaddress.ip_address(stripped_candidate)
+                candidate = stripped_candidate
+                is_ip_literal = True
+            except ValueError:
+                is_ip_literal = False
+
+            if not is_ip_literal:
+                parsed_host = urlparse(f"//{candidate}").hostname
+                if parsed_host:
+                    candidate = parsed_host.lower()
+
+            candidate = candidate.rstrip(".")
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                hosts.append(candidate)
+
+        return hosts
+
+    def is_host_allowed(self, host, allowlist_hosts):
+        if not allowlist_hosts:
+            return True
+
+        normalized_host = (host or "").strip().lower().rstrip(".")
+        if not normalized_host:
+            return False
+
+        for rule in allowlist_hosts:
+            normalized_rule = (rule or "").strip().lower().rstrip(".")
+            if not normalized_rule:
+                continue
+
+            if normalized_rule.startswith("*."):
+                root = normalized_rule[2:]
+                suffix = normalized_rule[1:]
+                if normalized_host == root or normalized_host.endswith(suffix):
+                    return True
+                continue
+
+            if normalized_rule.startswith(".") and normalized_host.endswith(normalized_rule):
+                return True
+
+            if normalized_host == normalized_rule:
+                return True
+
+        return False
+
+    def get_ip_block_reason(self, ip_obj):
+        mapped_ip = getattr(ip_obj, "ipv4_mapped", None)
+        if mapped_ip is not None:
+            ip_obj = mapped_ip
+
+        if ip_obj.is_loopback:
+            return "loopback"
+        if ip_obj.is_link_local:
+            return "link-local"
+        if ip_obj.is_private:
+            return "private"
+        if ip_obj.is_multicast:
+            return "multicast"
+        if ip_obj.is_reserved:
+            return "reserved"
+        if ip_obj.is_unspecified:
+            return "unspecified"
+        if getattr(ip_obj, "is_site_local", False):
+            return "site-local"
+        if not ip_obj.is_global:
+            return "non-public"
+        return ""
+
+    def validate_ip_is_public(self, ip_text, host_text):
+        ip_obj = ipaddress.ip_address(ip_text)
+        reason = self.get_ip_block_reason(ip_obj)
+        if reason:
+            raise ImageDownloadValidationError(
+                f"Image URL host is blocked ({reason}): {host_text} -> {ip_text}"
+            )
+
+    def resolve_host_ips(self, host, port):
+        try:
+            addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise ImageDownloadValidationError(f"Image URL host resolve failed: {host}. {str(e)}")
+
+        ips = []
+        seen = set()
+        for info in addr_infos:
+            sockaddr = info[4]
+            if not sockaddr:
+                continue
+            ip_text = str(sockaddr[0]).strip()
+            if ip_text and ip_text not in seen:
+                seen.add(ip_text)
+                ips.append(ip_text)
+
+        if not ips:
+            raise ImageDownloadValidationError(f"Image URL host resolve returned no address: {host}")
+
+        return ips
+
+    def validate_download_url(self, url, allowlist_hosts):
+        parsed = urlparse(str(url).strip())
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            raise ImageDownloadValidationError("Image URL must use http or https.")
+
+        if parsed.username or parsed.password:
+            raise ImageDownloadValidationError("Image URL must not include user info.")
+
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            raise ImageDownloadValidationError("Image URL is missing hostname.")
+
+        if host == "localhost":
+            raise ImageDownloadValidationError("Image URL host is blocked (localhost).")
+
+        if allowlist_hosts and not self.is_host_allowed(host, allowlist_hosts):
+            allowed_text = ", ".join(allowlist_hosts[:20])
+            if len(allowlist_hosts) > 20:
+                allowed_text = f"{allowed_text}, ..."
+            raise ImageDownloadValidationError(
+                f"Image URL host is not in allowlist: {host}. Allowed: {allowed_text}"
+            )
+
+        try:
+            ip_obj = ipaddress.ip_address(host)
+        except ValueError:
+            port = parsed.port if parsed.port is not None else (443 if scheme == "https" else 80)
+            resolved_ips = self.resolve_host_ips(host, port)
+            for resolved_ip in resolved_ips:
+                self.validate_ip_is_public(resolved_ip, host)
+        else:
+            self.validate_ip_is_public(str(ip_obj), host)
+
+    def download_image_with_limits(self, url, timeout_seconds, allowlist_hosts):
+        download_timeout = max(5, min(int(timeout_seconds), 120))
+        current_url = str(url).strip()
+        redirect_count = 0
+
+        while True:
+            self.validate_download_url(current_url, allowlist_hosts)
+
+            response = requests.get(
+                current_url,
+                timeout=download_timeout,
+                stream=True,
+                allow_redirects=False,
+            )
+            try:
+                status_code = int(response.status_code)
+                if status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ImageDownloadValidationError(
+                            f"Image download redirect missing Location header (HTTP {status_code})."
+                        )
+                    if redirect_count >= self.IMAGE_DOWNLOAD_MAX_REDIRECTS:
+                        raise ImageDownloadValidationError(
+                            f"Image download redirect limit exceeded ({self.IMAGE_DOWNLOAD_MAX_REDIRECTS})."
+                        )
+                    current_url = urljoin(current_url, location.strip())
+                    redirect_count += 1
+                    continue
+
+                response.raise_for_status()
+
+                content_length = response.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        declared_size = int(content_length)
+                        if declared_size > self.IMAGE_DOWNLOAD_MAX_BYTES:
+                            raise ImageDownloadValidationError(
+                                f"Image download exceeds size limit "
+                                f"({declared_size}>{self.IMAGE_DOWNLOAD_MAX_BYTES} bytes)."
+                            )
+                    except ValueError:
+                        pass
+
+                buffer = io.BytesIO()
+                total_size = 0
+                for chunk in response.iter_content(chunk_size=self.IMAGE_DOWNLOAD_CHUNK_SIZE):
+                    if not chunk:
+                        continue
+                    total_size += len(chunk)
+                    if total_size > self.IMAGE_DOWNLOAD_MAX_BYTES:
+                        raise ImageDownloadValidationError(
+                            f"Image download exceeds size limit ({self.IMAGE_DOWNLOAD_MAX_BYTES} bytes)."
+                        )
+                    buffer.write(chunk)
+
+                if total_size <= 0:
+                    raise ImageDownloadValidationError("Image download returned empty body.")
+
+                return buffer.getvalue()
+            finally:
+                response.close()
 
     def parse_json_object(self, value, field_name):
         if value is None:
@@ -591,22 +834,25 @@ class OpenAICompatibleV2Node:
 
         return unique_urls
 
-    def url_to_tensor(self, url, timeout_seconds, max_retries=0, retry_backoff=1.0):
-        # Clamp download timeout so very long model timeout does not block download too long.
-        download_timeout = max(5, min(int(timeout_seconds), 120))
+    def url_to_tensor(self, url, timeout_seconds, max_retries=0, retry_backoff=1.0, host_allowlist=""):
         attempts = max(1, int(max_retries) + 1)
         last_error = "Unknown download error"
+        allowlist_hosts = self.parse_host_allowlist(host_allowlist)
 
         for attempt in range(attempts):
             try:
-                response = requests.get(url, timeout=download_timeout)
-                response.raise_for_status()
-
-                pil_image = Image.open(io.BytesIO(response.content))
+                image_bytes = self.download_image_with_limits(
+                    url=url,
+                    timeout_seconds=timeout_seconds,
+                    allowlist_hosts=allowlist_hosts,
+                )
+                pil_image = Image.open(io.BytesIO(image_bytes))
                 pil_image = pil_image.convert("RGB")
 
                 img_np = np.array(pil_image).astype(np.float32) / 255.0
                 return torch.from_numpy(img_np).unsqueeze(0)
+            except ImageDownloadValidationError as e:
+                raise Exception(str(e))
             except Exception as e:
                 last_error = str(e)
                 if attempt < attempts - 1:
@@ -617,7 +863,8 @@ class OpenAICompatibleV2Node:
 
         raise Exception(f"Failed after {attempts} attempts: {last_error}")
 
-    def resolve_output_image(self, response_text, fallback_image, timeout_seconds, download_max_retries, download_retry_backoff):
+    def resolve_output_image(self, response_text, fallback_image, timeout_seconds, download_max_retries, download_retry_backoff,
+                             download_host_allowlist=""):
         urls = self.extract_markdown_image_urls(response_text)
         if not urls:
             return fallback_image, "", [], ""
@@ -631,6 +878,7 @@ class OpenAICompatibleV2Node:
                 timeout_seconds,
                 max_retries=download_max_retries,
                 retry_backoff=download_retry_backoff,
+                host_allowlist=download_host_allowlist,
             )
             return output_image, "", urls, selected_url
         except Exception as e:
@@ -665,6 +913,7 @@ class OpenAICompatibleV2Node:
         return json.dumps(wrapped, ensure_ascii=False)
 
     def make_return(self, response, final_answer, status, http_status, model_name, api_url, api_key, max_tokens, user_prompt, raw_json, image):
+        masked_api_key = self.mask_api_key(api_key)
         return (
             response,
             final_answer,
@@ -672,7 +921,7 @@ class OpenAICompatibleV2Node:
             http_status,
             model_name,
             api_url,
-            api_key,
+            masked_api_key,
             max_tokens,
             user_prompt,
             raw_json,
@@ -681,7 +930,8 @@ class OpenAICompatibleV2Node:
 
     def call_api(self, system_prompt, user_prompt, temperature, model_name, api_url, api_key, max_tokens, seed, use_seed,
                  api_mode, token_field, auto_retry_on_fail, max_retries, retry_backoff, timeout_seconds, download_max_retries, download_retry_backoff,
-                 response_path, extra_headers_json, extra_body_json, download_markdown_image, strip_think_tag, image=None):
+                 response_path, extra_headers_json, extra_body_json, download_markdown_image, strip_think_tag=True,
+                 image=None, download_host_allowlist=""):
 
         def error_result(msg, http_status=0, raw_json=""):
             final_answer = self.strip_think(msg) if strip_think_tag else msg
@@ -780,6 +1030,7 @@ class OpenAICompatibleV2Node:
                                 timeout_seconds,
                                 download_max_retries,
                                 download_retry_backoff,
+                                download_host_allowlist,
                             )
                             raw_json = self.enrich_raw_json_with_image_meta(
                                 raw_json,
@@ -939,7 +1190,8 @@ class OpenAICompatibleV2MultiImageNode(OpenAICompatibleV2Node):
 
     def call_api_multi(self, system_prompt, user_prompt, temperature, model_name, api_url, api_key, max_tokens, seed, use_seed,
                        api_mode, token_field, auto_retry_on_fail, max_retries, retry_backoff, timeout_seconds, download_max_retries, download_retry_backoff,
-                       response_path, extra_headers_json, extra_body_json, max_images, strip_think_tag, image=None):
+                       response_path, extra_headers_json, extra_body_json, max_images, strip_think_tag=True,
+                       image=None, download_host_allowlist=""):
 
         base_result = super().call_api(
             system_prompt=system_prompt,
@@ -963,6 +1215,7 @@ class OpenAICompatibleV2MultiImageNode(OpenAICompatibleV2Node):
             extra_headers_json=extra_headers_json,
             extra_body_json=extra_body_json,
             download_markdown_image=False,
+            download_host_allowlist=download_host_allowlist,
             strip_think_tag=strip_think_tag,
             image=image,
         )
@@ -996,6 +1249,7 @@ class OpenAICompatibleV2MultiImageNode(OpenAICompatibleV2Node):
                         timeout_seconds,
                         max_retries=download_max_retries,
                         retry_backoff=download_retry_backoff,
+                        host_allowlist=download_host_allowlist,
                     )
                 )
                 downloaded_count += 1
