@@ -2,7 +2,8 @@
 <img width="1390" height="1415" alt="image" src="https://github.com/user-attachments/assets/3bcc7d8a-96c7-4c52-a2ce-f0eb7726c955" />
 
 ## 项目说明
-- 本项目专门面向 `[grok-image-edit](https://github.com/chenyme/grok2api?tab=readme-ov-file)` 兼容开发，主要用于我个人生成编辑模型数据集的批处理流程。
+- 本项目专门面向 `[grok-image-edit](https://github.com/chenyme/grok2api?tab=readme-ov-file)` 兼容开发，主要用于我个人本地调用生成编辑模型数据集的批处理流程。
+- 不要部署暴露在公网，没有想过鉴权。
 - 本项目代码与文档100%由GPT5.3CODEX-CLAUDE4.6OPS-GLM5编写请大家放心。
 - 推荐使用base64格式返回图片。
 ## 功能概览
