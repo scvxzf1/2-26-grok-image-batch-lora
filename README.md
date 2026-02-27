@@ -4,7 +4,7 @@
 ## 项目说明
 - 本项目专门面向 `[grok-image-edit](https://github.com/chenyme/grok2api?tab=readme-ov-file)` 兼容开发，主要用于我个人生成编辑模型数据集的批处理流程。
 - 本项目代码与文档100%由 AI 编写请大家放心。
-
+- 推荐使用base64格式返回图片。
 ## 功能概览
 
 - 输入路径（目录或单图）后，批量读取图片并并发调用 API。
