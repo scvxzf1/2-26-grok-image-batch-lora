@@ -1,11 +1,9 @@
 # 图片批处理调度台
-<img width="1408" height="1399" alt="image" src="https://github.com/user-attachments/assets/82390f03-f236-43d7-a904-93cd596b97d1" />
+<img width="1390" height="1415" alt="image" src="https://github.com/user-attachments/assets/3bcc7d8a-96c7-4c52-a2ce-f0eb7726c955" />
 
 ## 项目说明
-
-- 本项目专门面向 `grok-image-edit` 模型设计，用于我个人生成编辑模型数据集的批处理流程。
-- 本仓库主要用于自用留档（“水个库”），不提供、也不讨论 `grok-image-edit` API 获取渠道。
-- 本项目代码与文档主要由 AI 辅助编写与整理。
+- 本项目专门面向 `[grok-image-edit](https://github.com/chenyme/grok2api?tab=readme-ov-file)` 兼容开发，主要用于我个人生成编辑模型数据集的批处理流程。
+- 本项目代码与文档100%由 AI 编写请大家放心。
 
 ## 功能概览
 
